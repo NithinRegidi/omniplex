@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import Stripe from 'stripe';
-import { db } from '@/../firebaseConfig';
+"use client";
+import React, { useEffect, useState, useRef } from 'react';
+import { db } from '../../../../firebaseConfig';
 import { doc, setDoc } from 'firebase/firestore';
 import { useSelector } from 'react-redux';
 import { selectUserDetailsState } from '@/store/authSlice';
@@ -9,35 +9,76 @@ import { selectUserDetailsState } from '@/store/authSlice';
 
 export default function SuccessPage() {
   const [status, setStatus] = useState<'verifying' | 'saved' | 'error'>('verifying');
+  const [message, setMessage] = useState<string>('Verifying your payment...');
   const user = useSelector(selectUserDetailsState);
 
+  const statusRef = useRef(status);
+  useEffect(() => { statusRef.current = status; }, [status]);
+
   useEffect(() => {
-    const verifyAndSave = async () => {
+    let cancelled = false;
+    const url = new URL(window.location.href);
+    const sessionId = url.searchParams.get('session_id');
+    if (!sessionId) {
+      setStatus('error');
+      setMessage('Missing session id.');
+      return;
+    }
+    const controller = new AbortController();
+    const verify = async () => {
       try {
-        const url = new URL(window.location.href);
-        const sessionId = url.searchParams.get('session_id');
-        if (!sessionId) {
-          setStatus('error');
-          return;
+        setMessage('Verifying your payment...');
+        const res = await fetch(`/api/stripe/verify?session_id=${sessionId}`, { signal: controller.signal });
+        if (!res.ok) {
+          throw new Error('Verification failed');
         }
-        // Simple client acknowledgement (in production add a server route to verify session)
-        if (user.uid) {
-          await setDoc(doc(db, 'users', user.uid), { plan: 'pro' }, { merge: true });
+        const data = await res.json();
+        if (data.payment_status === 'paid' || data.status === 'complete') {
+          if (user.uid) {
+            try { await setDoc(doc(db, 'users', user.uid), { plan: 'pro' }, { merge: true }); } catch {}
+          }
+          if (!cancelled) {
+            setStatus('saved');
+            setMessage('Payment successful! Your account is now Pro.');
+          }
+        } else {
+          if (!cancelled) {
+            setStatus('error');
+            setMessage('Payment not completed.');
+          }
         }
-        setStatus('saved');
       } catch (e) {
-        console.error(e);
-        setStatus('error');
+        if (!cancelled) {
+          setStatus('error');
+          setMessage('Could not verify payment.');
+        }
       }
     };
-    verifyAndSave();
+    verify();
+    const timeout = setTimeout(() => {
+      if (statusRef.current === 'verifying') {
+        setStatus('error');
+        setMessage('Timeout verifying payment.');
+      }
+    }, 15000);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timeout);
+    };
   }, [user.uid]);
 
   return (
     <div style={{ padding: 32 }}>
-      {status === 'verifying' && <p>Verifying your payment...</p>}
-      {status === 'saved' && <p>Payment successful! Your account is now Pro.</p>}
-      {status === 'error' && <p>Could not verify payment. Contact support.</p>}
+      <p>{message}</p>
+      {status === 'saved' && (
+        <a href="/" style={{ color: '#6366f1', textDecoration: 'underline' }}>Go back</a>
+      )}
+      {status === 'error' && (
+        <div style={{ marginTop: 12 }}>
+          <a href="/" style={{ color: '#ef4444', textDecoration: 'underline' }}>Return home</a>
+        </div>
+      )}
     </div>
   );
 }
